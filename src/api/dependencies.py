@@ -50,11 +50,21 @@ REDIS_TTL        = int(os.environ.get("REDIS_TTL",       86400))
 
 CHARACTER_DATA_DIR = Path("character_data")
 
-GENERATION_MODEL = "gemini-2.0-flash"
+GENERATION_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 RETRIEVAL_TOP_K  = 5
 
-#: Namespace used in both the ingest pipeline and retrieval queries.
+#: Namespace for character build chunks.
 NAMESPACE = "characters"
+
+#: Separate namespace for the semantic answer cache.
+#: Stores { question_text -> cached_answer } as Pinecone records so we can
+#: find semantically similar past questions without an exact hash match.
+CACHE_NAMESPACE = "answer_cache"
+
+#: Similarity threshold above which a cached answer is considered a hit.
+#: 0.92 is tight enough to avoid wrong-character matches while catching
+#: rephrased versions of the same question.
+CACHE_SIMILARITY_THRESHOLD = 0.92
 
 # ---------------------------------------------------------------------------
 # Client singletons

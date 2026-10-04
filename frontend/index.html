@@ -97,9 +97,16 @@
     .bubble {
       padding: 10px 14px;
       border-radius: var(--radius);
-      white-space: pre-wrap;
       word-break: break-word;
     }
+    /* User + error bubbles are plain text — preserve their line breaks.
+       Bot bubbles contain block-level HTML from the markdown renderer,
+       so they use normal whitespace to avoid doubled line spacing. */
+    .msg.user  .bubble,
+    .msg.error .bubble { white-space: pre-wrap; }
+    .msg.bot   .bubble { white-space: normal; }
+    .msg.bot   .bubble > div { margin: 0; }
+
     .msg.user  .bubble { background: var(--user-bg); border: 1px solid var(--border); }
     .msg.bot   .bubble { background: var(--bot-bg);  border: 1px solid var(--border); }
     .msg.error .bubble { background: #2a1212; border: 1px solid #6b2b2b; color: #e07070; }
@@ -259,6 +266,32 @@ const SUGGESTIONS = [
   'Is Varka C2 worth pulling?',
 ];
 
+/* ── Slash commands ──────────────────────────────────────────────────────── */
+//
+//  /list [element] [weapon]   — list all known characters, optional filters
+//  /compare <char1> <char2> [aspect]  — compare two characters
+//  /team <char>               — shortcut for "what teams work with X?"
+//  /artifacts <char>          — shortcut for artifact build
+//  /weapons <char>            — shortcut for weapon recommendations
+//  /materials <char>          — shortcut for farming materials
+//  /clear                     — clear chat
+//  /help                      — show command list
+//
+const COMMANDS = {
+  list:      cmdList,
+  compare:   cmdCompare,
+  team:      cmdTeam,
+  teams:     cmdTeam,
+  artifacts: cmdArtifacts,
+  artifact:  cmdArtifacts,
+  weapons:   cmdWeapons,
+  weapon:    cmdWeapons,
+  materials: cmdMaterials,
+  material:  cmdMaterials,
+  clear:     cmdClear,
+  help:      cmdHelp,
+};
+
 /* ── DOM refs ────────────────────────────────────────────────────────────── */
 const chatEl    = document.getElementById('chat');
 const inputEl   = document.getElementById('question-input');
@@ -269,9 +302,8 @@ const statusDot = document.getElementById('status-dot');
 /* ── Init ────────────────────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {
   appendBotMessage(
-    'Hello! Ask me anything about Genshin Impact character builds — ' +
-    'artifacts, weapons, team comps, talent priority, or materials.\n\n' +
-    'Try one of the suggestions below, or type your own question.',
+    'Hello! Ask me anything about Genshin Impact builds — artifacts, weapons, teams, talents, or materials.\n\n'
+    + 'Type **/help** to see available slash commands, or try a suggestion below.',
     [], false, null,
   );
   renderSuggestions();
@@ -297,7 +329,7 @@ async function checkBackend() {
     }
   } catch {
     statusDot.className = 'error';
-    statusDot.title     = 'Backend unreachable — run: uvicorn src.api.app:app --reload';
+    statusDot.title     = 'Backend unreachable — run: py serve.py';
   }
 }
 
@@ -339,12 +371,8 @@ function appendBotMessage(text, sources, cached, latency) {
   const meta = document.createElement('div');
   meta.className = 'meta';
 
-  if (cached) {
-    meta.appendChild(makeTag('⚡ cached', 'cached'));
-  }
-  if (latency !== null) {
-    meta.appendChild(makeTag(`${latency} ms`, 'latency'));
-  }
+  if (cached) meta.appendChild(makeTag('⚡ cached', 'cached'));
+  if (latency !== null) meta.appendChild(makeTag(`${latency} ms`, 'latency'));
 
   const seen = new Set();
   for (const s of (sources || [])) {
@@ -373,10 +401,7 @@ function showTyping() {
   const el = document.createElement('div');
   el.className = 'msg bot';
   el.id        = 'typing';
-  el.innerHTML = `
-    <div class="typing-indicator" aria-label="Loading">
-      <span></span><span></span><span></span>
-    </div>`;
+  el.innerHTML = `<div class="typing-indicator" aria-label="Loading"><span></span><span></span><span></span></div>`;
   chatEl.appendChild(el);
   scrollToBottom();
 }
@@ -384,13 +409,185 @@ function hideTyping() { document.getElementById('typing')?.remove(); }
 
 function makeTag(text, cls) {
   const el = document.createElement('span');
-  el.className   = `tag ${cls}`;
+  el.className = `tag ${cls}`;
   el.textContent = text;
   return el;
 }
 
+/* ── Slash command handlers ──────────────────────────────────────────────── */
+async function cmdHelp() {
+  appendBotMessage(
+    '**Available commands:**\n\n'
+    + '• **/list** — show all known characters\n'
+    + '• **/list pyro** — filter by element (Pyro/Hydro/Electro/Cryo/Anemo/Geo/Dendro)\n'
+    + '• **/list claymore** — filter by weapon type\n'
+    + '• **/compare <char1> <char2>** — side-by-side overall comparison\n'
+    + '• **/compare <char1> <char2> artifacts** — compare a specific aspect\n'
+    + '  (aspects: artifacts · weapons · teams · talents · constellations · materials)\n'
+    + '• **/team <char>** — team compositions for a character\n'
+    + '• **/artifacts <char>** — artifact build\n'
+    + '• **/weapons <char>** — weapon recommendations\n'
+    + '• **/materials <char>** — ascension and talent materials\n'
+    + '• **/clear** — clear the chat\n\n'
+    + 'Or just ask naturally — "best artifacts for Varka", "who pairs with Furina", etc.',
+    [], false, null,
+  );
+}
+
+async function cmdClear() {
+  chatEl.innerHTML = '';
+  suggestEl.style.display = '';
+  renderSuggestions();
+  appendBotMessage('Chat cleared. What would you like to know?', [], false, null);
+}
+
+async function cmdList(args) {
+  setLoading(true);
+  showTyping();
+  try {
+    const params = new URLSearchParams();
+    // args may be element or weapon type
+    const ELEMENTS = ['pyro','hydro','electro','cryo','anemo','geo','dendro'];
+    const WEAPONS  = ['sword','claymore','polearm','bow','catalyst'];
+    for (const arg of args) {
+      if (ELEMENTS.includes(arg.toLowerCase())) params.set('element', capitalize(arg));
+      else if (WEAPONS.includes(arg.toLowerCase())) params.set('weapon', capitalize(arg));
+    }
+    const res  = await fetch(`${API_BASE}/characters?${params}`);
+    const data = await res.json();
+    hideTyping();
+
+    if (!data.characters.length) {
+      appendBotMessage('No characters found with those filters.', [], false, null);
+      return;
+    }
+
+    // Group by element for display
+    const byElement = {};
+    for (const c of data.characters) {
+      const el = c.element || 'Unknown';
+      (byElement[el] = byElement[el] || []).push(c);
+    }
+
+    const ELEMENT_EMOJI = {
+      Pyro:'🔥', Hydro:'💧', Electro:'⚡', Cryo:'❄️',
+      Anemo:'🌪️', Geo:'🪨', Dendro:'🌿', Unknown:'❓',
+    };
+
+    let lines = [`**${data.count} characters**\n`];
+    for (const [el, chars] of Object.entries(byElement).sort()) {
+      const emoji = ELEMENT_EMOJI[el] || '';
+      lines.push(`${emoji} **${el}:** ` + chars.map(c => c.name).join(', '));
+    }
+    appendBotMessage(lines.join('\n'), [], false, null);
+  } catch (e) {
+    hideTyping();
+    appendErrorMessage(`Failed to fetch characters: ${e.message}`);
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function cmdCompare(args) {
+  if (args.length < 2) {
+    appendBotMessage('Usage: **/compare** `<character1>` `<character2>` `[aspect]`\n\nExample: `/compare Varka Hu Tao artifacts`', [], false, null);
+    return;
+  }
+  // Heuristic: last word is an aspect if it matches a known section
+  const ASPECTS = ['artifacts','weapons','teams','talents','constellations','materials','overview'];
+  let charA, charB, aspect = 'overall';
+  if (ASPECTS.includes(args[args.length - 1].toLowerCase())) {
+    aspect = args.pop().toLowerCase();
+  }
+  // Split remaining args roughly in half for two character names
+  const mid = Math.ceil(args.length / 2);
+  charA = args.slice(0, mid).join(' ');
+  charB = args.slice(mid).join(' ');
+
+  if (!charA || !charB) {
+    appendBotMessage('Provide two character names. Example: `/compare Varka Neuvillette`', [], false, null);
+    return;
+  }
+
+  appendUserMessage(`/compare ${charA} ${charB} ${aspect}`);
+  setLoading(true);
+  showTyping();
+  try {
+    const res = await fetch(`${API_BASE}/compare`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ character_a: charA, character_b: charB, aspect }),
+    });
+    hideTyping();
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      appendErrorMessage(`Error ${res.status}: ${err.detail || res.statusText}`);
+      return;
+    }
+    const data = await res.json();
+    appendBotMessage(data.answer, data.sources, false, data.latency_ms);
+  } catch (e) {
+    hideTyping();
+    appendErrorMessage(`Compare failed: ${e.message}`);
+  } finally {
+    setLoading(false);
+  }
+}
+
+// Shortcut commands that just reformulate as a /query
+async function cmdTeam(args) {
+  if (!args.length) { appendBotMessage('Usage: **/team** `<character>`', [], false, null); return; }
+  inputEl.value = `What are the best team compositions for ${args.join(' ')}?`;
+  await dispatchQuery();
+}
+
+async function cmdArtifacts(args) {
+  if (!args.length) { appendBotMessage('Usage: **/artifacts** `<character>`', [], false, null); return; }
+  inputEl.value = `What are the best artifacts for ${args.join(' ')}?`;
+  await dispatchQuery();
+}
+
+async function cmdWeapons(args) {
+  if (!args.length) { appendBotMessage('Usage: **/weapons** `<character>`', [], false, null); return; }
+  inputEl.value = `What are the best weapons for ${args.join(' ')}?`;
+  await dispatchQuery();
+}
+
+async function cmdMaterials(args) {
+  if (!args.length) { appendBotMessage('Usage: **/materials** `<character>`', [], false, null); return; }
+  inputEl.value = `What materials do I need to ascend and level talents for ${args.join(' ')}?`;
+  await dispatchQuery();
+}
+
 /* ── Send flow ───────────────────────────────────────────────────────────── */
 async function onSend() {
+  const raw = inputEl.value.trim();
+  if (!raw) return;
+
+  // Handle slash commands
+  if (raw.startsWith('/')) {
+    inputEl.value = '';
+    autoResize();
+    hideSuggestions();
+    const parts = raw.slice(1).trim().split(/\s+/);
+    const cmd   = parts[0].toLowerCase();
+    const args  = parts.slice(1);
+
+    if (cmd !== 'compare') appendUserMessage(raw);  // compare echoes its own message
+
+    const handler = COMMANDS[cmd];
+    if (handler) {
+      await handler(args);
+    } else {
+      appendErrorMessage(`Unknown command: /${cmd}\nType /help for available commands.`);
+    }
+    return;
+  }
+
+  await dispatchQuery();
+}
+
+async function dispatchQuery() {
   const question = inputEl.value.trim();
   if (!question) return;
 
@@ -406,27 +603,25 @@ async function onSend() {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ question }),
+      signal:  AbortSignal.timeout(45000),   // 45s — generation can be slow
     });
-
     hideTyping();
-
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      appendErrorMessage(`Error ${res.status}: ${err.detail || res.statusText}`);
+      appendErrorMessage(`Server error ${res.status}: ${err.detail || res.statusText}`);
       return;
     }
-
     const data = await res.json();
     appendBotMessage(data.answer, data.sources, data.cached, data.latency_ms);
-
   } catch (err) {
     hideTyping();
-    appendErrorMessage(
-      `Could not reach the backend.\n`
-      + `Make sure it is running:\n\n`
-      + `  uvicorn src.api.app:app --reload\n\n`
-      + `(${err.message})`,
-    );
+    if (err.name === 'TimeoutError') {
+      appendErrorMessage('The request timed out. The server may be busy — please try again.');
+    } else {
+      appendErrorMessage(
+        'Could not reach the backend. Make sure it is running:\n\n  py serve.py'
+      );
+    }
   } finally {
     setLoading(false);
     inputEl.focus();
@@ -455,42 +650,49 @@ function escHtml(s) {
     .replace(/"/g,  '&quot;');
 }
 
-function titleCase(s) { return s.replace(/\b\w/g, c => c.toUpperCase()); }
+function titleCase(s)   { return s.replace(/\b\w/g, c => c.toUpperCase()); }
+function capitalize(s)  { return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase(); }
 
-/**
- * Lightweight Markdown renderer (no dependencies).
- * Handles: **bold**, `inline code`, bullet lists (•  -  *), blank-line breaks.
- */
 function renderMarkdown(text) {
   let s = escHtml(text);
-
-  // **bold**
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-
-  // `code`
+  s = s.replace(/\*(.+?)\*/g,     '<em>$1</em>');
   s = s.replace(
     /`([^`]+)`/g,
     '<code style="background:#1e2030;padding:1px 5px;border-radius:4px;font-size:13px">$1</code>',
   );
 
-  // Bullet lists
+  // Normalize: collapse 3+ newlines to 2, trim trailing whitespace per line
+  s = s.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+
   const lines = s.split('\n');
   const out   = [];
   let inList  = false;
+  let blankRun = 0;
 
   for (const line of lines) {
-    const m = line.match(/^([•\-*])\s+(.+)/);
+    const m = line.match(/^\s*([•\-*])\s+(.+)/);
     if (m) {
-      if (!inList) { out.push('<ul style="padding-left:18px;margin:4px 0">'); inList = true; }
+      if (!inList) { out.push('<ul style="padding-left:18px;margin:6px 0">'); inList = true; }
       out.push(`<li style="margin:2px 0">${m[2]}</li>`);
+      blankRun = 0;
+    } else if (line.trim() === '') {
+      // One paragraph break max between blocks — ignore extra blank lines
+      if (!inList && blankRun === 0 && out.length) {
+        out.push('<div style="height:8px"></div>');
+      }
+      blankRun++;
     } else {
       if (inList) { out.push('</ul>'); inList = false; }
-      out.push(line === '' ? '<br>' : line);
+      out.push(`<div>${line}</div>`);
+      blankRun = 0;
     }
   }
   if (inList) out.push('</ul>');
 
-  return out.join('\n');
+  // Join with NO separator — <div>/<li> handle their own line breaks, so the
+  // CSS `white-space: pre-wrap` won't add phantom extra newlines.
+  return out.join('');
 }
 </script>
 

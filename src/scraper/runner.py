@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from datetime import date
 from pathlib import Path
@@ -33,35 +34,13 @@ INDEX_URL = "https://game8.co/games/Genshin-Impact/archives/530535"
 OUTPUT_DIR = Path("character_data")
 REQUEST_DELAY_SECONDS = 1.5
 
-# Characters confirmed on the index page as playable
-KNOWN_CHAR_NAMES: frozenset[str] = frozenset({
-    "aino", "albedo", "alhaitham", "aloy", "amber", "arlecchino", "ayaka",
-    "ayato", "baizhu", "barbara", "beidou", "bennett", "candace", "charlotte",
-    "chasca", "chevreuse", "chiori", "chongyun", "citlali", "clorinde",
-    "collei", "columbina", "cyno", "dahlia", "dehya", "diluc", "diona",
-    "dori", "durin", "emilie", "escoffier", "eula", "faruzan", "fischl",
-    "flins", "freminet", "furina", "gaming", "ganyu", "gorou", "heizou",
-    "hu tao", "iansan", "ifa", "illuga", "ineffa", "itto", "jahoda", "jean",
-    "kachina", "kaeya", "kaveh", "kazuha", "keqing", "kinich", "kirara",
-    "klee", "kokomi", "lan yan", "lauma", "layla", "linnea", "lisa", "lohen",
-    "lynette", "lyney", "mavuika", "mika", "mizuki", "mona", "mualani",
-    "nahida", "navia", "nefer", "neuvillette", "nicole", "nilou", "ningguang",
-    "noelle", "odette", "ororon", "prune", "qiqi", "raiden", "razor",
-    "rosaria", "sandrone", "sara", "sayu", "sethos", "shenhe", "shinobu",
-    "sigewinne", "skirk", "sucrose", "tartaglia", "thoma", "tighnari",
-    "varesa", "varka", "venti", "wanderer", "wriothesley", "xiangling",
-    "xianyun", "xiao", "xilonen", "xingqiu", "xinyan", "yae miko", "yanfei",
-    "yaoyao", "yelan", "yoimiya", "yun jin", "zhongli", "zibai",
-    "traveler (anemo)", "traveler (cryo)", "traveler (dendro)",
-    "traveler (electro)", "traveler (geo)", "traveler (hydro)", "traveler (pyro)",
-})
-
-# Upcoming characters — no build page exists yet
-UPCOMING_SKIP: frozenset[str] = frozenset({
-    "alice", "capitano", "dainsleif", "danica", "dottore", "mitya",
-    "noy", "pantalone", "pierro", "pulcinella", "rerir", "tsaritsa",
-    "valeriy", "vesna", "vodyanitsa",
-})
+# Upcoming characters listed on game8 that actually have build pages
+# (released but game8 hasn't moved them to the "Playable Characters" section yet).
+# These are scraped alongside the playable characters.
+_RELEASED_BUT_UPCOMING: list[tuple[str, str]] = [
+    ("Vesna",      "https://game8.co/games/Genshin-Impact/archives/606901"),
+    ("Vodyanitsa", "https://game8.co/games/Genshin-Impact/archives/606400"),
+]
 
 # ---------------------------------------------------------------------------
 # Discovery
@@ -71,60 +50,121 @@ def discover_character_urls() -> list[tuple[str, str]]:
     """
     Return ``[(character_name, url), ...]`` for all playable characters
     listed on the game8 "All Best Builds" index page.
+
+    Discovery is fully dynamic: we locate the ``<h4>Playable Characters``
+    section in the page HTML and extract every character link within it,
+    stopping at the ``<h4>Upcoming Characters`` heading.  This means new
+    characters added to game8 are picked up automatically — no hardcoded
+    name list to maintain.
     """
     print(f"Fetching character index: {INDEX_URL}")
     resp = requests.get(INDEX_URL, headers=HEADERS, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    seen_urls: set[str] = set()
+    # Find the "Playable Characters" section heading
+    play_heading = None
+    for h4 in soup.find_all("h4"):
+        if h4.get_text(strip=True) == "Playable Characters":
+            play_heading = h4
+            break
+
+    if not play_heading:
+        print("WARNING: 'Playable Characters' heading not found — falling back to full-page scan.")
+        return _discover_fallback(soup)
+
+    # Walk siblings until "Upcoming Characters" or another h4
     seen_names: set[str] = set()
+    results:    list[tuple[str, str]] = []
+
+    for sib in play_heading.find_next_siblings():
+        if sib.name in ("h2", "h3", "h4"):
+            break  # reached the next section
+
+        for a in sib.find_all("a", href=True):
+            href = a["href"].split("#")[0]
+            if not href or "/games/Genshin-Impact/archives/" not in href:
+                continue
+
+            text = a.get_text(strip=True)
+            if not text or text.lower() in seen_names:
+                continue
+
+            full_url = "https://game8.co" + href if href.startswith("/") else href
+            seen_names.add(text.lower())
+            results.append((text, full_url))
+
+    # Add characters that have build pages but are still listed under
+    # "Upcoming Characters" on game8 (released but not yet moved to the
+    # "Playable Characters" section).
+    for name, url in _RELEASED_BUT_UPCOMING:
+        if name.lower() not in seen_names:
+            seen_names.add(name.lower())
+            results.append((name, url))
+
+    return results
+    """
+    Fallback discovery if the section heading isn't found.
+    Scans the whole page for short archive links, excluding known
+    non-character pages. Less precise but ensures we don't return nothing.
+    """
+    non_char = {
+        "tier list", "best build", "weapon", "artifact", "team comp",
+        "reroll", "exploration", "upcoming", "guide", "banner", "code",
+    }
+    seen: set[str] = set()
     results: list[tuple[str, str]] = []
 
     for a in soup.find_all("a", href=True):
-        href: str = a["href"]
-        if "/games/Genshin-Impact/archives/" not in href:
+        href = a["href"].split("#")[0]
+        if not href or "/games/Genshin-Impact/archives/" not in href:
             continue
-
         text = a.get_text(strip=True)
-        if not text or text.lower() not in KNOWN_CHAR_NAMES:
+        if not text or len(text) > 40 or text.lower() in seen:
             continue
-
+        if any(kw in text.lower() for kw in non_char):
+            continue
+        seen.add(text.lower())
         full_url = "https://game8.co" + href if href.startswith("/") else href
-        char_key = text.lower()
-
-        if full_url in seen_urls or char_key in seen_names:
-            continue
-        if char_key.split()[0] in UPCOMING_SKIP:
-            continue
-
-        seen_urls.add(full_url)
-        seen_names.add(char_key)
         results.append((text, full_url))
 
     return results
 
 
 # ---------------------------------------------------------------------------
-# Skip logic
+# Filename / skip logic
 # ---------------------------------------------------------------------------
+
+def _slugify(char_name: str) -> str:
+    """
+    Convert an index-page character name into a stable filename stem.
+
+    "Raiden"             -> "raiden"
+    "Hu Tao"             -> "hu_tao"
+    "Traveler (Anemo)"   -> "traveler_anemo"
+    "Arataki Itto"       -> "arataki_itto"
+
+    Parentheses are flattened (not dropped) so Traveler variants stay distinct.
+    """
+    slug = char_name.lower().strip()
+    slug = slug.replace("(", "").replace(")", "")
+    slug = re.sub(r"[^\w\s-]", "", slug)   # drop stray punctuation
+    slug = re.sub(r"\s+", "_", slug)        # spaces -> underscores
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug
+
 
 def _already_scraped_today(char_name: str) -> bool:
     """
     True if a JSON for *char_name* was written today.
 
     Uses file mtime rather than ``last_updated`` (which reflects game8's
-    content revision date, not our scrape date).
-
-    Matching is first-word fuzzy: ``"Tartaglia"`` matches
-    ``tartaglia_(childe).json`` because both start with ``tartaglia``.
+    content revision date, not our scrape date). Matches on the exact slug
+    now that filenames are derived from the stable index-page name.
     """
-    first_word = char_name.lower().split()[0]
-    today = date.today()
-    for path in OUTPUT_DIR.glob("*.json"):
-        if path.stem.lower().startswith(first_word):
-            if date.fromtimestamp(path.stat().st_mtime) == today:
-                return True
+    path = OUTPUT_DIR / f"{_slugify(char_name)}.json"
+    if path.exists():
+        return date.fromtimestamp(path.stat().st_mtime) == date.today()
     return False
 
 
@@ -164,7 +204,12 @@ def scrape_all(
         print(f"{prefix} Scraping {char_name} ...")
         try:
             data = scrape_character_page(url)
-            fname = (data.get("character_name") or char_name).lower().replace(" ", "_")
+            # Filename is derived from the INDEX page name (char_name), which is
+            # stable and canonical ("Raiden", "Arataki Itto"). The scraped
+            # character_name can be a longer title ("Raiden Shogun") or a page
+            # heading ("Arataki Itto Rating and Information") — using it would
+            # create duplicate/misnamed files.
+            fname = _slugify(char_name)
             out_path = OUTPUT_DIR / f"{fname}.json"
             out_path.write_text(
                 json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
