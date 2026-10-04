@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Genshin Build Assistant</title>
+  <style>
+    /* ── Reset & base ───────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #0f1117;
+      --surface:    #1a1d27;
+      --border:     #2a2d3a;
+      --accent:     #c8a84b;   /* Genshin gold */
+      --accent-dim: #8a6f2e;
+      --text:       #e8e8f0;
+      --text-dim:   #7a7d8e;
+      --user-bg:    #1e2436;
+      --bot-bg:     #161924;
+      --tag-bg:     #252836;
+      --danger:     #e05c5c;
+      --radius:     10px;
+      --font:       'Segoe UI', system-ui, sans-serif;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    /* ── Layout ─────────────────────────────────────────────────────────── */
+    .shell {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      max-width: 780px;
+      margin: 0 auto;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+    .logo    { font-size: 22px; line-height: 1; user-select: none; }
+    .title   { font-size: 17px; font-weight: 600; color: var(--accent); letter-spacing: .3px; }
+    .subtitle { font-size: 12px; color: var(--text-dim); }
+
+    #status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      margin-left: auto;
+      flex-shrink: 0;
+      transition: background .3s;
+    }
+    #status-dot.ok    { background: #4caf74; }
+    #status-dot.error { background: var(--danger); }
+
+    /* ── Chat area ───────────────────────────────────────────────────────── */
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      scroll-behavior: smooth;
+    }
+
+    /* ── Message bubbles ─────────────────────────────────────────────────── */
+    .msg {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-width: 92%;
+      animation: fadeUp .18s ease both;
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0);   }
+    }
+    .msg.user  { align-self: flex-end; }
+    .msg.bot   { align-self: flex-start; }
+    .msg.error { align-self: flex-start; }
+
+    .bubble {
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user  .bubble { background: var(--user-bg); border: 1px solid var(--border); }
+    .msg.bot   .bubble { background: var(--bot-bg);  border: 1px solid var(--border); }
+    .msg.error .bubble { background: #2a1212; border: 1px solid #6b2b2b; color: #e07070; }
+    .bubble strong     { color: var(--accent); }
+
+    /* ── Meta row (sources + latency) ───────────────────────────────────── */
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      padding-left: 2px;
+    }
+    .tag {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 20px;
+      background: var(--tag-bg);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      cursor: default;
+    }
+    .tag.cached  { border-color: var(--accent-dim); color: var(--accent); }
+    .tag.source  { color: #8ab4d4; border-color: #2d4158; }
+    .tag.latency { font-variant-numeric: tabular-nums; }
+
+    /* ── Typing indicator ────────────────────────────────────────────────── */
+    .typing-indicator {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 12px 14px;
+      background: var(--bot-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      width: fit-content;
+    }
+    .typing-indicator span {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      animation: bounce .9s infinite;
+    }
+    .typing-indicator span:nth-child(2) { animation-delay: .15s; }
+    .typing-indicator span:nth-child(3) { animation-delay: .30s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40%            { transform: translateY(-5px); }
+    }
+
+    /* ── Suggested questions ─────────────────────────────────────────────── */
+    #suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 0 16px 14px;
+      flex-shrink: 0;
+    }
+    .suggestion-btn {
+      font-size: 12px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-dim);
+      cursor: pointer;
+      transition: border-color .15s, color .15s;
+    }
+    .suggestion-btn:hover { border-color: var(--accent-dim); color: var(--accent); }
+
+    /* ── Input bar ───────────────────────────────────────────────────────── */
+    .input-bar {
+      display: flex;
+      gap: 10px;
+      padding: 12px 16px 16px;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+    #question-input {
+      flex: 1;
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+      resize: none;
+      min-height: 42px;
+      max-height: 140px;
+      transition: border-color .15s;
+    }
+    #question-input:focus       { border-color: var(--accent-dim); }
+    #question-input::placeholder { color: var(--text-dim); }
+    #send-btn {
+      align-self: flex-end;
+      padding: 10px 18px;
+      border-radius: var(--radius);
+      border: none;
+      background: var(--accent);
+      color: #0f1117;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s, opacity .15s;
+      white-space: nowrap;
+    }
+    #send-btn:hover    { background: #d9b85a; }
+    #send-btn:disabled { opacity: .45; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<div class="shell">
+
+  <header>
+    <div class="logo">⚔️</div>
+    <div>
+      <div class="title">Genshin Build Assistant</div>
+      <div class="subtitle">Artifact · Weapon · Team · Talent · Materials</div>
+    </div>
+    <div id="status-dot" title="Checking backend…"></div>
+  </header>
+
+  <div id="chat" role="log" aria-live="polite" aria-label="Chat messages"></div>
+
+  <div id="suggestions" aria-label="Suggested questions"></div>
+
+  <div class="input-bar">
+    <textarea
+      id="question-input"
+      rows="1"
+      placeholder="Ask about a character's build, team comp, materials…"
+      aria-label="Your question"
+    ></textarea>
+    <button id="send-btn" aria-label="Send">Send</button>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+/* ── Config ──────────────────────────────────────────────────────────────── */
+const API_BASE = 'http://localhost:8000';
+
+const SUGGESTIONS = [
+  'What are the best artifacts for Varka?',
+  'What main stats do I need on Varka?',
+  'Best weapon for Varka?',
+  'What teams work with Varka?',
+  'What talents should I level on Varka?',
+  'What materials do I need to ascend Varka?',
+  'Is Varka good? What are his weaknesses?',
+  'Is Varka C2 worth pulling?',
+];
+
+/* ── DOM refs ────────────────────────────────────────────────────────────── */
+const chatEl    = document.getElementById('chat');
+const inputEl   = document.getElementById('question-input');
+const sendBtn   = document.getElementById('send-btn');
+const suggestEl = document.getElementById('suggestions');
+const statusDot = document.getElementById('status-dot');
+
+/* ── Init ────────────────────────────────────────────────────────────────── */
+window.addEventListener('DOMContentLoaded', () => {
+  appendBotMessage(
+    'Hello! Ask me anything about Genshin Impact character builds — ' +
+    'artifacts, weapons, team comps, talent priority, or materials.\n\n' +
+    'Try one of the suggestions below, or type your own question.',
+    [], false, null,
+  );
+  renderSuggestions();
+  checkBackend();
+  inputEl.addEventListener('keydown', onKeyDown);
+  inputEl.addEventListener('input',   autoResize);
+  sendBtn.addEventListener('click',   onSend);
+});
+
+/* ── Backend health check ────────────────────────────────────────────────── */
+async function checkBackend() {
+  try {
+    const res  = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(4000) });
+    const data = res.ok ? await res.json() : null;
+    if (data) {
+      statusDot.className = 'ok';
+      statusDot.title     =
+        `Backend OK · Redis: ${data.redis} · `
+        + `${data.known_characters.length} characters loaded`;
+    } else {
+      statusDot.className = 'error';
+      statusDot.title     = `Backend error (HTTP ${res.status})`;
+    }
+  } catch {
+    statusDot.className = 'error';
+    statusDot.title     = 'Backend unreachable — run: uvicorn src.api.app:app --reload';
+  }
+}
+
+/* ── Suggestions ─────────────────────────────────────────────────────────── */
+function renderSuggestions() {
+  SUGGESTIONS.forEach(q => {
+    const btn = document.createElement('button');
+    btn.className   = 'suggestion-btn';
+    btn.textContent = q;
+    btn.addEventListener('click', () => {
+      inputEl.value = q;
+      autoResize();
+      hideSuggestions();
+      onSend();
+    });
+    suggestEl.appendChild(btn);
+  });
+}
+function hideSuggestions() { suggestEl.style.display = 'none'; }
+
+/* ── Message rendering ───────────────────────────────────────────────────── */
+function appendUserMessage(text) {
+  const el = document.createElement('div');
+  el.className = 'msg user';
+  el.innerHTML = `<div class="bubble">${escHtml(text)}</div>`;
+  chatEl.appendChild(el);
+  scrollToBottom();
+}
+
+function appendBotMessage(text, sources, cached, latency) {
+  const msg    = document.createElement('div');
+  msg.className = 'msg bot';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.innerHTML = renderMarkdown(text);
+  msg.appendChild(bubble);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+
+  if (cached) {
+    meta.appendChild(makeTag('⚡ cached', 'cached'));
+  }
+  if (latency !== null) {
+    meta.appendChild(makeTag(`${latency} ms`, 'latency'));
+  }
+
+  const seen = new Set();
+  for (const s of (sources || [])) {
+    const key = `${s.character}::${s.section}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const tag = makeTag(`${titleCase(s.character)} › ${s.section}`, 'source');
+    tag.title = `Score: ${s.score} · Updated: ${s.last_updated}`;
+    meta.appendChild(tag);
+  }
+
+  if (meta.children.length) msg.appendChild(meta);
+  chatEl.appendChild(msg);
+  scrollToBottom();
+}
+
+function appendErrorMessage(text) {
+  const el = document.createElement('div');
+  el.className = 'msg error';
+  el.innerHTML = `<div class="bubble">${escHtml(text)}</div>`;
+  chatEl.appendChild(el);
+  scrollToBottom();
+}
+
+function showTyping() {
+  const el = document.createElement('div');
+  el.className = 'msg bot';
+  el.id        = 'typing';
+  el.innerHTML = `
+    <div class="typing-indicator" aria-label="Loading">
+      <span></span><span></span><span></span>
+    </div>`;
+  chatEl.appendChild(el);
+  scrollToBottom();
+}
+function hideTyping() { document.getElementById('typing')?.remove(); }
+
+function makeTag(text, cls) {
+  const el = document.createElement('span');
+  el.className   = `tag ${cls}`;
+  el.textContent = text;
+  return el;
+}
+
+/* ── Send flow ───────────────────────────────────────────────────────────── */
+async function onSend() {
+  const question = inputEl.value.trim();
+  if (!question) return;
+
+  hideSuggestions();
+  appendUserMessage(question);
+  inputEl.value = '';
+  autoResize();
+  setLoading(true);
+  showTyping();
+
+  try {
+    const res = await fetch(`${API_BASE}/query`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ question }),
+    });
+
+    hideTyping();
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      appendErrorMessage(`Error ${res.status}: ${err.detail || res.statusText}`);
+      return;
+    }
+
+    const data = await res.json();
+    appendBotMessage(data.answer, data.sources, data.cached, data.latency_ms);
+
+  } catch (err) {
+    hideTyping();
+    appendErrorMessage(
+      `Could not reach the backend.\n`
+      + `Make sure it is running:\n\n`
+      + `  uvicorn src.api.app:app --reload\n\n`
+      + `(${err.message})`,
+    );
+  } finally {
+    setLoading(false);
+    inputEl.focus();
+  }
+}
+
+/* ── Utility ─────────────────────────────────────────────────────────────── */
+function setLoading(on) { sendBtn.disabled = inputEl.disabled = on; }
+
+function onKeyDown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); }
+}
+
+function autoResize() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = `${Math.min(inputEl.scrollHeight, 140)}px`;
+}
+
+function scrollToBottom() { chatEl.scrollTop = chatEl.scrollHeight; }
+
+function escHtml(s) {
+  return s
+    .replace(/&/g,  '&amp;')
+    .replace(/</g,  '&lt;')
+    .replace(/>/g,  '&gt;')
+    .replace(/"/g,  '&quot;');
+}
+
+function titleCase(s) { return s.replace(/\b\w/g, c => c.toUpperCase()); }
+
+/**
+ * Lightweight Markdown renderer (no dependencies).
+ * Handles: **bold**, `inline code`, bullet lists (•  -  *), blank-line breaks.
+ */
+function renderMarkdown(text) {
+  let s = escHtml(text);
+
+  // **bold**
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+  // `code`
+  s = s.replace(
+    /`([^`]+)`/g,
+    '<code style="background:#1e2030;padding:1px 5px;border-radius:4px;font-size:13px">$1</code>',
+  );
+
+  // Bullet lists
+  const lines = s.split('\n');
+  const out   = [];
+  let inList  = false;
+
+  for (const line of lines) {
+    const m = line.match(/^([•\-*])\s+(.+)/);
+    if (m) {
+      if (!inList) { out.push('<ul style="padding-left:18px;margin:4px 0">'); inList = true; }
+      out.push(`<li style="margin:2px 0">${m[2]}</li>`);
+    } else {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push(line === '' ? '<br>' : line);
+    }
+  }
+  if (inList) out.push('</ul>');
+
+  return out.join('\n');
+}
+</script>
+
+</body>
+</html>
