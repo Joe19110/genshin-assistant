@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
+from collections.abc import Iterator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from google.genai import types as gtypes
 from pinecone.db_data.dataclasses.search_query import SearchQuery
 from pydantic import BaseModel
@@ -40,15 +43,52 @@ from ..dependencies import (
     redis_client,
     resolve_character,
 )
+from ..limiter import RATE_LIMIT_COMPARE, RATE_LIMIT_QUERY, limiter
 
 router = APIRouter()
+log = logging.getLogger("genshin.query")
+
+# ---------------------------------------------------------------------------
+# Conversation memory
+# ---------------------------------------------------------------------------
+# A session is identified by an opaque ``session_id`` the frontend generates
+# and sends with each request. We remember only the last character the user
+# was asking about, so a follow-up like "what about their weapons?" resolves
+# to that character instead of failing. Stored in Redis with a short TTL.
+
+SESSION_TTL = 1800  # 30 minutes of inactivity
+
+
+def _session_key(session_id: str) -> str:
+    return "genshin::session::" + hashlib.sha256(session_id.encode()).hexdigest()
+
+
+def _remember_character(session_id: str | None, character: str | None) -> None:
+    """Persist the last-resolved character for this session (best-effort)."""
+    if not session_id or not character:
+        return
+    try:
+        redis_client.setex(_session_key(session_id), SESSION_TTL, character)
+    except Exception:
+        pass
+
+
+def _recall_character(session_id: str | None) -> str | None:
+    """Return the last-resolved character for this session, if any."""
+    if not session_id:
+        return None
+    try:
+        return redis_client.get(_session_key(session_id))
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
 
 class QueryRequest(BaseModel):
-    question: str
+    question:   str
+    session_id: str | None = None
 
 
 class Source(BaseModel):
@@ -401,29 +441,55 @@ def _generate(question: str, chunks: list[str], sources: list[Source]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Route
+# Pipeline
 # ---------------------------------------------------------------------------
 
-@router.post("/query", response_model=QueryResponse)
-def query(req: QueryRequest) -> QueryResponse:
-    t0 = time.monotonic()
+class PipelineResult(BaseModel):
+    answer:   str
+    sources:  list[Source]
+    cached:   bool
+    #: Which stage produced the answer — for logging/observability.
+    #:   redis | semantic | fallback | empty | generated | error
+    source_layer: str
 
-    question = req.question.strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="question must not be empty.")
 
+def _resolve_with_memory(question: str, session_id: str | None) -> tuple[str | None, bool]:
+    """
+    Resolve the character for *question*, falling back to the session's
+    last-remembered character when the question names no character.
+
+    Returns ``(character, used_memory)``.
+    """
+    char = resolve_character(question)
+    if char:
+        return char, False
+    # No character in the question — try conversational memory for follow-ups.
+    remembered = _recall_character(session_id)
+    if remembered:
+        return remembered, True
+    return None, False
+
+
+def _run_pipeline(question: str, session_id: str | None) -> PipelineResult:
+    """
+    The shared RAG pipeline used by both ``/query`` and ``/query/stream``.
+
+    Walks the three cache layers, resolves the character (with conversation
+    memory), retrieves context, and generates an answer. Never raises for a
+    generation failure — returns a clean message instead.
+    """
     normalized = _normalize(question)
+    key        = _cache_key(normalized)
 
     # 1. Exact cache check (Redis — fastest path, ~1 ms)
-    key        = _cache_key(normalized)
     cached_raw = redis_client.get(key)
     if cached_raw:
         payload = json.loads(cached_raw)
-        return QueryResponse(
-            answer     = payload["answer"],
-            sources    = [Source(**s) for s in payload["sources"]],
-            cached     = True,
-            latency_ms = round((time.monotonic() - t0) * 1000, 1),
+        return PipelineResult(
+            answer=payload["answer"],
+            sources=[Source(**s) for s in payload["sources"]],
+            cached=True,
+            source_layer="redis",
         )
 
     # 2. Semantic cache check (Pinecone — catches rephrased questions, ~50 ms)
@@ -431,26 +497,20 @@ def query(req: QueryRequest) -> QueryResponse:
     if sem_hit:
         answer, source_dicts = sem_hit
         sources = [Source(**s) for s in source_dicts]
-        # Also write to Redis so the next identical hit is instant
         redis_client.setex(key, REDIS_TTL, json.dumps({
             "answer":  answer,
             "sources": [s.model_dump() for s in sources],
         }))
-        return QueryResponse(
-            answer     = answer,
-            sources    = sources,
-            cached     = True,
-            latency_ms = round((time.monotonic() - t0) * 1000, 1),
+        return PipelineResult(
+            answer=answer, sources=sources, cached=True, source_layer="semantic",
         )
 
-    # 3. Character resolution + fallback guard
-    char_filter = resolve_character(question)
-    if _is_unknown_character_question(question, char_filter):
-        return QueryResponse(
-            answer     = _fallback_message(question),
-            sources    = [],
-            cached     = False,
-            latency_ms = round((time.monotonic() - t0) * 1000, 1),
+    # 3. Character resolution (+ conversation memory) + fallback guard
+    char_filter, _used_mem = _resolve_with_memory(question, session_id)
+    if char_filter is None and _is_unknown_character_question(question, char_filter):
+        return PipelineResult(
+            answer=_fallback_message(question),
+            sources=[], cached=False, source_layer="fallback",
         )
 
     # 4. Section intent detection
@@ -458,38 +518,32 @@ def query(req: QueryRequest) -> QueryResponse:
 
     # 5. Retrieve
     chunks, sources = _retrieve(question, char_filter, section_filter)
-
     if not chunks:
         known = ", ".join(sorted(set(KNOWN_CHARACTERS.values())))
-        return QueryResponse(
-            answer = (
+        return PipelineResult(
+            answer=(
                 "I couldn't find relevant build data for your question. "
                 "Make sure the character has been scraped and ingested.\n\n"
                 f"Known characters: {known}."
             ),
-            sources    = [],
-            cached     = False,
-            latency_ms = round((time.monotonic() - t0) * 1000, 1),
+            sources=[], cached=False, source_layer="empty",
         )
 
-    # 6. Generate — never let a Gemini error 500 the endpoint; return a clean
-    #    message so the frontend shows it instead of "Failed to fetch".
+    # Remember the resolved character for conversational follow-ups.
+    _remember_character(session_id, char_filter)
+
+    # 6. Generate — never let a Gemini error 500 the endpoint.
     try:
         answer = _generate(question, chunks, sources)
     except Exception as exc:
-        import traceback
-        print("=== GENERATION ERROR ===")
-        traceback.print_exc()
-        print("========================")
-        return QueryResponse(
-            answer = (
+        log.exception("generation failed")
+        return PipelineResult(
+            answer=(
                 "The answer service hit an error while generating a response:\n\n"
                 f"`{type(exc).__name__}: {exc}`\n\n"
                 "Check the server console for the full traceback."
             ),
-            sources    = sources,
-            cached     = False,
-            latency_ms = round((time.monotonic() - t0) * 1000, 1),
+            sources=sources, cached=False, source_layer="error",
         )
 
     # 7. Cache — write to both Redis (exact match) and Pinecone (semantic)
@@ -499,12 +553,100 @@ def query(req: QueryRequest) -> QueryResponse:
     }))
     _semantic_cache_store(question, answer, sources)
 
-    return QueryResponse(
-        answer     = answer,
-        sources    = sources,
-        cached     = False,
-        latency_ms = round((time.monotonic() - t0) * 1000, 1),
+    return PipelineResult(
+        answer=answer, sources=sources, cached=False, source_layer="generated",
     )
+
+
+def _log_request(endpoint: str, question: str, result: PipelineResult,
+                 latency_ms: float, session_id: str | None) -> None:
+    """Emit a single structured log line summarising the request."""
+    log.info(
+        "endpoint=%s cached=%s layer=%s latency_ms=%.1f sources=%d "
+        "session=%s q=%r",
+        endpoint, result.cached, result.source_layer, latency_ms,
+        len(result.sources), (session_id or "-"), question[:120],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@router.post("/query", response_model=QueryResponse)
+@limiter.limit(RATE_LIMIT_QUERY)
+def query(req: QueryRequest, request: Request) -> QueryResponse:
+    t0 = time.monotonic()
+
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question must not be empty.")
+
+    result     = _run_pipeline(question, req.session_id)
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    _log_request("/query", question, result, latency_ms, req.session_id)
+
+    return QueryResponse(
+        answer     = result.answer,
+        sources    = result.sources,
+        cached     = result.cached,
+        latency_ms = latency_ms,
+    )
+
+
+@router.post("/query/stream")
+@limiter.limit(RATE_LIMIT_QUERY)
+def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
+    """
+    Server-Sent Events variant of ``/query``.
+
+    Runs the identical pipeline, then streams the answer to the client in
+    small chunks so the UI can render tokens progressively. Emits:
+
+        event: sources   data: [...]            (once, up front)
+        event: token     data: {"text": "..."}  (repeated)
+        event: done      data: {"cached":..., "latency_ms":...}
+
+    The answer is produced in full by the pipeline (Gemini call is not itself
+    streamed, which keeps the three-layer cache intact), then re-emitted as a
+    token stream. Cache hits therefore "stream" instantly.
+    """
+    t0 = time.monotonic()
+
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question must not be empty.")
+
+    def _event_stream() -> Iterator[str]:
+        result     = _run_pipeline(question, req.session_id)
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        _log_request("/query/stream", question, result, latency_ms, req.session_id)
+
+        # 1. Sources up front so the UI can show citations immediately.
+        yield _sse("sources", [s.model_dump() for s in result.sources])
+
+        # 2. Answer, chunked into word groups for a typing effect.
+        words = result.answer.split(" ")
+        buf: list[str] = []
+        for i, word in enumerate(words):
+            buf.append(word)
+            if len(buf) >= 6 or i == len(words) - 1:
+                yield _sse("token", {"text": " ".join(buf) + (" " if i < len(words) - 1 else "")})
+                buf = []
+
+        # 3. Done marker with metadata.
+        yield _sse("done", {"cached": result.cached, "latency_ms": latency_ms})
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _sse(event: str, data) -> str:
+    """Format a Server-Sent Events frame."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -524,7 +666,8 @@ class CompareResponse(BaseModel):
 
 
 @router.post("/compare", response_model=CompareResponse)
-def compare(req: CompareRequest) -> CompareResponse:
+@limiter.limit(RATE_LIMIT_COMPARE)
+def compare(req: CompareRequest, request: Request) -> CompareResponse:
     """
     Compare two characters across a given aspect (default: overall).
 

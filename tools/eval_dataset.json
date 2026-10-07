@@ -1,0 +1,131 @@
+{
+  "description": "Evaluation set for the Genshin build assistant RAG pipeline. Each entry has a question, the character it concerns, and the section(s) a correct retrieval should surface. 'unknown' entries test the known-character fallback. Ground-truth answers are short reference points for faithfulness checking, not exact-match targets.",
+  "questions": [
+    {
+      "id": "q01",
+      "question": "What are the best artifacts for Varka?",
+      "character": "varka",
+      "expected_sections": ["artifacts"],
+      "reference": "A Day Carved from Rising Winds (4-pc) is Varka's best-in-slot artifact set."
+    },
+    {
+      "id": "q02",
+      "question": "What main stats should I put on Varka's artifacts?",
+      "character": "varka",
+      "expected_sections": ["artifacts"],
+      "reference": "Sands: ATK%, Goblet: ATK% or Elemental DMG Bonus, Circlet: CRIT Rate/CRIT DMG."
+    },
+    {
+      "id": "q03",
+      "question": "What's the best weapon for Varka?",
+      "character": "varka",
+      "expected_sections": ["weapons"],
+      "reference": "Gest of the Mighty Wolf is Varka's best-in-slot weapon."
+    },
+    {
+      "id": "q04",
+      "question": "What F2P weapon can I use on Varka?",
+      "character": "varka",
+      "expected_sections": ["weapons"],
+      "reference": "Tidal Shadow is the recommended F2P weapon for Varka."
+    },
+    {
+      "id": "q05",
+      "question": "What teams work well with Varka?",
+      "character": "varka",
+      "expected_sections": ["teams"],
+      "reference": "Varka fits into Mono-Pyro, Mono-Hydro, Mono-Electro, and Mono-Cryo Hexerei teams."
+    },
+    {
+      "id": "q06",
+      "question": "What talents should I level first on Varka?",
+      "character": "varka",
+      "expected_sections": ["talents"],
+      "reference": "Elemental Skill first, then Elemental Burst, then Normal Attack."
+    },
+    {
+      "id": "q07",
+      "question": "What materials do I need to ascend Varka?",
+      "character": "varka",
+      "expected_sections": ["materials"],
+      "reference": "Wolfhook, Vayuda Turquoise gems, Mora, and the enemy drop materials."
+    },
+    {
+      "id": "q08",
+      "question": "Is Varka's C2 worth pulling?",
+      "character": "varka",
+      "expected_sections": ["constellations"],
+      "reference": "C2 is rated 2 stars; the signature weapon is recommended over constellations."
+    },
+    {
+      "id": "q09",
+      "question": "Is Varka a good character? What are his weaknesses?",
+      "character": "varka",
+      "expected_sections": ["overview"],
+      "reference": "Varka is a flexible Anemo DPS whose main weakness is low multipliers and heavy team/weapon dependency."
+    },
+    {
+      "id": "q10",
+      "question": "What are the best artifacts for Raiden Shogun?",
+      "character": "raiden",
+      "expected_sections": ["artifacts"],
+      "reference": "Emblem of Severed Fate (4-pc) is Raiden's best-in-slot set."
+    },
+    {
+      "id": "q11",
+      "question": "What weapon should Raiden use?",
+      "character": "raiden",
+      "expected_sections": ["weapons"],
+      "reference": "Engulfing Lightning is Raiden's best-in-slot weapon."
+    },
+    {
+      "id": "q12",
+      "question": "What are good teams for Raiden Shogun?",
+      "character": "raiden",
+      "expected_sections": ["teams"],
+      "reference": "Raiden fits International, Hypercarry, Overloaded, and Hyperbloom teams."
+    },
+    {
+      "id": "q13",
+      "question": "What's the best weapon for Skirk?",
+      "character": "skirk",
+      "expected_sections": ["weapons"],
+      "reference": "Azurelight is Skirk's best-in-slot weapon."
+    },
+    {
+      "id": "q14",
+      "question": "What teams does Skirk fit into?",
+      "character": "skirk",
+      "expected_sections": ["teams"],
+      "reference": "Skirk is best in Freeze teams with Furina, Escoffier, and similar units."
+    },
+    {
+      "id": "q15",
+      "question": "What artifacts should Bennett use?",
+      "character": "bennett",
+      "expected_sections": ["artifacts"],
+      "reference": "Noblesse Oblige (4-pc) is Bennett's timeless best-in-slot set."
+    },
+    {
+      "id": "q16",
+      "question": "What main stats does Sucrose want?",
+      "character": "sucrose",
+      "expected_sections": ["artifacts"],
+      "reference": "Elemental Mastery on Sands, Goblet, and Circlet."
+    },
+    {
+      "id": "q17",
+      "question": "What's the best build for a character you don't have data on, like Capitano?",
+      "character": "unknown",
+      "expected_sections": [],
+      "reference": "The assistant should say it doesn't have build data for Capitano yet."
+    },
+    {
+      "id": "q18",
+      "question": "How should I build Dottore?",
+      "character": "unknown",
+      "expected_sections": [],
+      "reference": "The assistant should say it doesn't have build data for Dottore yet."
+    }
+  ]
+}
